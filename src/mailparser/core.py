@@ -476,7 +476,6 @@ class MailParser:
                         payload_str = ported_string(payload_bytes, encoding=charset)
 
                     # Fallback only for base64, only if decode=True bytes is not utf8
-                    print(charset)
                     if (
                         cte == "base64"
                         and payload_bytes
