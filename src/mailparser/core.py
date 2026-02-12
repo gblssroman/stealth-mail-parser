@@ -22,6 +22,8 @@ import ipaddress
 import json
 import logging
 import os
+import re
+from binascii import Error as BinasciiError
 
 from mailparser.const import ADDRESSES_HEADERS, EPILOGUE_DEFECTS, REGXIP
 from mailparser.utils import (
@@ -40,6 +42,29 @@ from mailparser.utils import (
 )
 
 log = logging.getLogger(__name__)
+
+_BASE64_CAND_RE = re.compile(r"[A-Za-z0-9+/=\s]{20,}")
+
+def decode_failed_base64(raw_payload: str):
+    """
+    raw_payload: str from get_payload(decode=False)
+    Returns: str (utf-8) or None
+    """
+    # Find valid-looking B64 chunks
+    for c in _BASE64_CAND_RE.findall(raw_payload):
+        cleaned = "".join(c.split())
+        if len(cleaned) % 4 != 0:
+            continue
+        try:
+            b = base64.b64decode(cleaned, validate=False)
+        except (BinasciiError, ValueError):
+            continue
+        # Accept only if bytes are actually UTF-8
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return None
 
 
 def parse_from_file_obj(fp):
@@ -435,18 +460,39 @@ class MailParser:
                     # And for other encodings it breaks the characters so
                     # we need to decode them with encoding python is appying
                     # To maintain the characters
-                    payload = p.get_payload(decode=True)
+                    payload_bytes = p.get_payload(decode=True)
                     cte = p.get("Content-Transfer-Encoding")
-                    if cte:
-                        cte = cte.lower()
+                    cte = cte.lower() if cte else ""
 
-                    if not cte or cte in ["7bit", "8bit"]:
+                    # Base logic -> payload_str
+                    if not payload_bytes:
+                        payload_str = ""
+                    elif not cte or cte in ["7bit", "8bit"]:
                         try:
-                            payload = payload.decode("raw-unicode-escape")
+                            payload_str = payload_bytes.decode("raw-unicode-escape")
                         except UnicodeDecodeError:
-                            payload = ported_string(payload, encoding=charset)
+                            payload_str = ported_string(payload_bytes, encoding=charset)
                     else:
-                        payload = ported_string(payload, encoding=charset)
+                        payload_str = ported_string(payload_bytes, encoding=charset)
+
+                    # Fallback only for base64, only if decode=True bytes is not utf8
+                    print(charset)
+                    if (
+                        cte == "base64"
+                        and payload_bytes
+                        and charset.lower().replace("_", "-") in ("utf-8", "utf8")
+                    ):
+                        try:
+                            _ = payload_bytes.decode("utf-8")  # If ok - do nothing
+                        except UnicodeDecodeError:
+                            raw_payload = p.get_payload(decode=False) or ""
+                            fixed = decode_failed_base64(
+                                raw_payload
+                            )  # Should return str (utf-8) or None
+                            if fixed is not None:
+                                payload_str = fixed  # Override only if successful fix
+
+                    payload = payload_str
 
                     if payload:
                         if p.get_content_subtype() == "html":
